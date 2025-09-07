@@ -130,6 +130,13 @@ class VoiceManager(commands.Cog):
         # 退出挨拶を再生
         await self._play_greeting(member, is_join=False)
         
+        # 挨拶の再生完了を待機してからチャンネルをチェック
+        voice_client = self.bot.get_voice_client_for_guild(member.guild.id)
+        if voice_client and voice_client.is_playing():
+            # 音声再生が完了するまで待機
+            while voice_client.is_playing():
+                await asyncio.sleep(0.1)
+        
         # チャンネルに人がいなくなったかチェック
         await self._check_and_leave_if_empty(channel)
     
@@ -193,9 +200,9 @@ class VoiceManager(commands.Cog):
         
         # 挨拶メッセージ生成
         if is_join:
-            greeting_text = f"{member.display_name}さん、こんちゃ"
+            greeting_text = f"{member.display_name}さん、こんちゃ！"
         else:
-            greeting_text = f"{member.display_name}さん、またね"
+            greeting_text = f"{member.display_name}さん、またね！"
         
         try:
             # 音声合成・再生
