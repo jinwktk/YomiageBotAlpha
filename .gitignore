@@ -1,0 +1,39 @@
+# Environment variables
+.env
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Audio cache files
+cache/
+*.wav
+*.mp3
+
+# Log files
+logs/
+*.log
+
+# Temporary files
+tmp/
+*.tmp
+*.temp
+*.bak
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Serena files (development tool)
+.serena/
