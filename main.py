@@ -15,6 +15,8 @@ sys.path.insert(0, str(project_root))
 from bot.client import YomiageBotClient
 
 # ログ設定
+from logging.handlers import RotatingFileHandler
+
 def setup_logging(log_level: str = "INFO"):
     """ログ設定をセットアップ"""
     # ログディレクトリを作成
@@ -36,9 +38,11 @@ def setup_logging(log_level: str = "INFO"):
         handlers=[
             # コンソール出力
             logging.StreamHandler(sys.stdout),
-            # ファイル出力
-            logging.FileHandler(
+            # ファイル出力（ローテーション対応）
+            RotatingFileHandler(
                 log_dir / "yomiage.log",
+                maxBytes=10*1024*1024,  # 10MB
+                backupCount=9,  # 10件保持（現在+過去9件）
                 encoding='utf-8'
             )
         ]
@@ -52,7 +56,44 @@ def setup_logging(log_level: str = "INFO"):
     http_logger = logging.getLogger('discord.http')
     http_logger.setLevel(logging.WARNING)
     
-    logging.info("Logging setup completed")
+    logging.info("Logging setup completed with rotation (10MB per file, 10 files max)")
+
+
+def cleanup_old_logs(log_dir_path: Path, max_files: int = 10):
+    """
+    古いログファイルをクリーンアップ（指定した数を超える場合）
+    
+    Args:
+        log_dir_path: ログディレクトリのパス
+        max_files: 保持する最大ファイル数
+    """
+    try:
+        # ログファイル（yomiage.log*）を取得
+        log_files = list(log_dir_path.glob("yomiage.log*"))
+        
+        if len(log_files) <= max_files:
+            logging.info(f"Log files: {len(log_files)}/{max_files} files, no cleanup needed")
+            return
+        
+        # 作成時間でソート（古いファイルから順）
+        log_files.sort(key=lambda f: f.stat().st_mtime)
+        
+        # 古いファイルを削除
+        files_to_delete = log_files[:-max_files]
+        deleted_count = 0
+        
+        for file_path in files_to_delete:
+            try:
+                file_path.unlink()
+                deleted_count += 1
+                logging.info(f"Deleted old log file: {file_path.name}")
+            except Exception as e:
+                logging.warning(f"Failed to delete log file {file_path.name}: {e}")
+        
+        logging.info(f"Log cleanup completed: deleted {deleted_count} files, keeping {len(log_files) - deleted_count}/{max_files}")
+        
+    except Exception as e:
+        logging.error(f"Log cleanup failed: {e}")
 
 
 def load_environment():
@@ -86,6 +127,10 @@ async def main():
         # ロギング設定
         log_level = os.getenv('LOG_LEVEL', 'INFO')
         setup_logging(log_level)
+        
+        # 起動時にログファイルクリーンアップ
+        log_dir = Path("logs")
+        cleanup_old_logs(log_dir, max_files=10)
         
         logging.info("=" * 60)
         logging.info("YomiageBot Alpha v0.2.0 Starting...")

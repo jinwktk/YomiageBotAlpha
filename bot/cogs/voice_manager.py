@@ -225,9 +225,15 @@ class VoiceManager(commands.Cog):
         if not voice_client:
             return
         
-        # 音声が再生中の場合は待機
+        # 音声が再生中の場合は待機（最大10秒）
+        wait_timeout = 10.0
+        start_time = asyncio.get_event_loop().time()
         while voice_client.is_playing():
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)  # レスポンシブ性向上
+            # タイムアウトチェック
+            if asyncio.get_event_loop().time() - start_time > wait_timeout:
+                logger.warning("Voice playback wait timeout, proceeding anyway")
+                break
         
         try:
             # キャッシュをチェック

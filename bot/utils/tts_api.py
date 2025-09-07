@@ -9,9 +9,8 @@ import json
 logger = logging.getLogger(__name__)
 
 
-class TTSAPIError(Exception):
-    """TTS API関連のエラー"""
-    pass
+# エラーハンドラーのインポート
+from .error_handler import TTSAPIError, ErrorSeverity, ErrorCategory, handle_errors
 
 
 class TTSAPIClient:
@@ -20,7 +19,7 @@ class TTSAPIClient:
     def __init__(
         self,
         api_url: str = "http://192.168.0.99:5000",
-        timeout: float = 10.0,
+        timeout: float = 30.0,  # TTS処理時間を考慮して延長
         default_settings: Optional[Dict[str, Any]] = None
     ):
         """
@@ -53,7 +52,17 @@ class TTSAPIClient:
     async def _get_session(self) -> aiohttp.ClientSession:
         """HTTPセッションを取得（遅延初期化）"""
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=self.timeout)
+            # コネクションプールを有効化してパフォーマンス向上
+            connector = aiohttp.TCPConnector(
+                limit=10,  # 総接続数制限
+                limit_per_host=5,  # ホスト単位接続数制限
+                keepalive_timeout=30,  # キープアライブ時間
+                enable_cleanup_closed=True  # 閉じられた接続の自動クリーンアップ
+            )
+            self._session = aiohttp.ClientSession(
+                timeout=self.timeout,
+                connector=connector
+            )
         return self._session
     
     async def close(self):
@@ -83,11 +92,22 @@ class TTSAPIClient:
                 
         except aiohttp.ClientError as e:
             logger.error(f"Failed to get models info: {e}")
-            raise TTSAPIError(f"Network error: {e}") from e
+            raise TTSAPIError(
+                f"Network error: {e}",
+                original_error=e
+            )
         except Exception as e:
             logger.error(f"Unexpected error getting models info: {e}")
-            raise TTSAPIError(f"Unexpected error: {e}") from e
+            raise TTSAPIError(
+                f"Unexpected error: {e}",
+                original_error=e
+            )
     
+    @handle_errors(
+        severity=ErrorSeverity.HIGH,
+        category=ErrorCategory.API,
+        user_notify=True
+    )
     async def synthesize_speech(
         self,
         text: str,
@@ -167,7 +187,11 @@ class TTSAPIClient:
                 if response.status != 200:
                     error_text = await response.text()
                     logger.error(f"TTS API error {response.status}: {error_text}")
-                    raise TTSAPIError(f"API error {response.status}: {error_text}")
+                    raise TTSAPIError(
+                        f"API error {response.status}: {error_text}",
+                        status_code=response.status,
+                        context={"text": text[:50], "settings": settings}
+                    )
                 
                 # Content-Typeチェック
                 content_type = response.headers.get("Content-Type", "")
@@ -184,10 +208,18 @@ class TTSAPIClient:
                 
         except aiohttp.ClientError as e:
             logger.error(f"Failed to synthesize speech: {e}")
-            raise TTSAPIError(f"Network error: {e}") from e
+            raise TTSAPIError(
+                f"Network error: {e}",
+                context={"text": text[:50]},
+                original_error=e
+            )
         except Exception as e:
             logger.error(f"Unexpected error synthesizing speech: {e}")
-            raise TTSAPIError(f"Unexpected error: {e}") from e
+            raise TTSAPIError(
+                f"Unexpected error: {e}",
+                context={"text": text[:50]},
+                original_error=e
+            )
     
     async def test_connection(self) -> bool:
         """

@@ -32,8 +32,8 @@ class TTSHandler(commands.Cog):
         self.text_processor = TextProcessor()
         self.cache_manager = CacheManager(cache_dir=str(self.bot.cache_dir))
         
-        # 音声再生キュー（ギルドごと）
-        self.tts_queues = {}
+        # 音声再生キュー（ギルドごと）: asyncio.Queue使用
+        self.tts_queues = {}  # guild_id -> asyncio.Queue
         self.processing_flags = {}  # ギルドごとの処理中フラグ
         
         logger.info("TTSHandler cog initialized")
@@ -134,9 +134,9 @@ class TTSHandler(commands.Cog):
             text: 読み上げテキスト
             author_name: 送信者の表示名
         """
-        # キューの初期化
+        # キューの初期化（asyncio.Queue使用で効率化）
         if guild_id not in self.tts_queues:
-            self.tts_queues[guild_id] = []
+            self.tts_queues[guild_id] = asyncio.Queue()
         
         # メッセージをキューに追加
         queue_item = {
@@ -145,8 +145,8 @@ class TTSHandler(commands.Cog):
             "timestamp": discord.utils.utcnow()
         }
         
-        self.tts_queues[guild_id].append(queue_item)
-        logger.info(f"[DEBUG] Queued TTS message: {text[:30]}... (queue size: {len(self.tts_queues[guild_id])})")
+        await self.tts_queues[guild_id].put(queue_item)
+        logger.info(f"[DEBUG] Queued TTS message: {text[:30]}... (queue size: {self.tts_queues[guild_id].qsize()})")
         
         # キュー処理を開始（既に処理中でない場合）
         if guild_id not in self.processing_flags or not self.processing_flags[guild_id]:
@@ -164,16 +164,28 @@ class TTSHandler(commands.Cog):
         logger.info(f"[DEBUG] Starting TTS queue processing for guild {guild_id}")
         
         try:
-            while guild_id in self.tts_queues and self.tts_queues[guild_id]:
-                # キューから次のアイテムを取得
-                queue_item = self.tts_queues[guild_id].pop(0)
-                logger.info(f"[DEBUG] Processing queue item: {queue_item['text'][:30]}...")
-                
-                # ボイスクライアントの状態確認
-                voice_client = self.bot.get_voice_client_for_guild(guild_id)
-                if not voice_client or not voice_client.is_connected():
-                    logger.info(f"Voice client disconnected, clearing TTS queue for guild {guild_id}")
-                    self.tts_queues[guild_id].clear()
+            while guild_id in self.tts_queues:
+                try:
+                    # キューから次のアイテムを取得（1秒タイムアウト）
+                    queue_item = await asyncio.wait_for(
+                        self.tts_queues[guild_id].get(), timeout=1.0
+                    )
+                    logger.info(f"[DEBUG] Processing queue item: {queue_item['text'][:30]}...")
+                    
+                    # ボイスクライアントの状態確認
+                    voice_client = self.bot.get_voice_client_for_guild(guild_id)
+                    if not voice_client or not voice_client.is_connected():
+                        logger.info(f"Voice client disconnected, ending TTS queue processing for guild {guild_id}")
+                        # キューをクリア
+                        while not self.tts_queues[guild_id].empty():
+                            try:
+                                self.tts_queues[guild_id].get_nowait()
+                            except asyncio.QueueEmpty:
+                                break
+                        break
+                except asyncio.TimeoutError:
+                    # キューが空の場合、処理終了
+                    logger.debug(f"TTS queue timeout for guild {guild_id}, ending processing")
                     break
                 
                 # 音声合成・再生
@@ -254,7 +266,7 @@ class TTSHandler(commands.Cog):
         start_time = asyncio.get_event_loop().time()
         
         while voice_client.is_playing():
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)  # より細かいチェック間隔でレスポンシブ性向上
             
             # タイムアウトチェック
             if asyncio.get_event_loop().time() - start_time > timeout:
@@ -283,16 +295,30 @@ class TTSHandler(commands.Cog):
         """現在のTTSキューを表示"""
         guild_id = ctx.guild.id
         
-        if guild_id not in self.tts_queues or not self.tts_queues[guild_id]:
+        if guild_id not in self.tts_queues or self.tts_queues[guild_id].empty():
             await ctx.send("読み上げキューは空です。")
             return
         
-        queue_size = len(self.tts_queues[guild_id])
-        queue_preview = []
+        queue_size = self.tts_queues[guild_id].qsize()
         
-        for i, item in enumerate(self.tts_queues[guild_id][:5]):  # 最大5件表示
+        # キューの内容を一時的に退避して表示（非破壊的読み取り）
+        temp_items = []
+        try:
+            while not self.tts_queues[guild_id].empty():
+                item = self.tts_queues[guild_id].get_nowait()
+                temp_items.append(item)
+        except asyncio.QueueEmpty:
+            pass
+        
+        # 表示用リスト作成
+        queue_preview = []
+        for i, item in enumerate(temp_items[:5]):  # 最大5件表示
             text_preview = item["text"][:30] + "..." if len(item["text"]) > 30 else item["text"]
             queue_preview.append(f"{i+1}. {item['author']}: {text_preview}")
+        
+        # キューに戻す
+        for item in temp_items:
+            await self.tts_queues[guild_id].put(item)
         
         preview_text = "\n".join(queue_preview)
         
@@ -313,8 +339,14 @@ class TTSHandler(commands.Cog):
         guild_id = ctx.guild.id
         
         if guild_id in self.tts_queues:
-            queue_size = len(self.tts_queues[guild_id])
-            self.tts_queues[guild_id].clear()
+            queue_size = self.tts_queues[guild_id].qsize()
+            
+            # キューを空にする
+            while not self.tts_queues[guild_id].empty():
+                try:
+                    self.tts_queues[guild_id].get_nowait()
+                except asyncio.QueueEmpty:
+                    break
             
             await ctx.send(f"読み上げキューをクリアしました ({queue_size} 件削除)")
             logger.info(f"TTS queue cleared in {ctx.guild.name} ({queue_size} items)")
